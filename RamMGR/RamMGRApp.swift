@@ -5,17 +5,23 @@
 //  Created by Kellam Adams on 4/14/26.
 //
 
+import AppKit
 import SwiftUI
-import CoreData
 
 @main
 struct RamMGRApp: App {
-    let persistenceController = PersistenceController.shared
+    init() {
+        if let iconImage = NSImage(named: "AppIcon") {
+            NSApplication.shared.applicationIconImage = iconImage
+        }
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 309, height: 320)
+        .windowResizability(.contentSize)
     }
 }

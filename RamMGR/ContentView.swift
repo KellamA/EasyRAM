@@ -5,79 +5,164 @@
 //  Created by Kellam Adams on 4/14/26.
 //
 
+import AppKit
 import SwiftUI
-import CoreData
 
 struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
-
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
-        animation: .default)
-    private var items: FetchedResults<Item>
+    @StateObject private var memoryMonitor = MemoryMonitor()
 
     var body: some View {
-        NavigationView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
-                    }
-                }
-                .onDelete(perform: deleteItems)
+        ZStack {
+            WindowConfigurator()
+
+            HStack(spacing: 10) {
+                MeterCard(
+                    title: "Pressure",
+                    valueText: memoryMonitor.snapshot.pressureText,
+                    multilineValue: false,
+                    fillFraction: memoryMonitor.snapshot.pressureFraction,
+                    fillGradient: memoryMonitor.snapshot.pressureGradient,
+                    detailText: nil,
+                    detailFraction: 0
+                )
+
+                MeterCard(
+                    title: "Usage",
+                    valueText: memoryMonitor.snapshot.usageMultilineText,
+                    multilineValue: true,
+                    fillFraction: memoryMonitor.snapshot.usageFraction,
+                    fillGradient: memoryMonitor.snapshot.usageGradient,
+                    detailText: memoryMonitor.snapshot.compressedText,
+                    detailFraction: memoryMonitor.snapshot.compressedFraction
+                )
             }
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
+            .padding(8)
+            .background {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(.ultraThinMaterial.opacity(0.55))
+                    .shadow(color: .black.opacity(0.10), radius: 10, y: 6)
                 }
-            }
-            Text("Select an item")
         }
+        .padding(8)
+        .frame(width: 309, height: 320)
+        .background(Color.clear)
+    }
+}
+
+private struct MeterCard: View {
+    let title: String
+    let valueText: String
+    let multilineValue: Bool
+    let fillFraction: Double
+    let fillGradient: LinearGradient
+    let detailText: String?
+    let detailFraction: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.58))
+
+                Spacer()
+            }
+
+            GeometryReader { geometry in
+                let meterHeight = geometry.size.height
+                let fillHeight = max(geometry.size.height * fillFraction, 44)
+                let detailHeight = geometry.size.height * detailFraction
+
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color.white.opacity(0.04))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(fillGradient)
+                        .frame(height: min(fillHeight, meterHeight - 12))
+                        .padding(8)
+                        .overlay(alignment: .bottom) {
+                            if let detailText, detailFraction > 0 {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color.black.opacity(0.18))
+                                    .frame(height: max(min(detailHeight, meterHeight - 28), 22))
+                                    .padding(.horizontal, 3)
+                                    .padding(.bottom, 3)
+                                    .overlay(alignment: .bottom) {
+                                        Text(detailText)
+                                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(Color.white.opacity(0.92))
+                                            .multilineTextAlignment(.center)
+                                            .minimumScaleFactor(0.55)
+                                            .lineLimit(2)
+                                            .padding(.horizontal, 8)
+                                            .padding(.bottom, 8)
+                                    }
+                            }
+                        }
+                        .overlay(alignment: .top) {
+                            Text(valueText)
+                                .font(.system(size: multilineValue ? 15 : 18, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Color.black.opacity(0.72))
+                                .multilineTextAlignment(.center)
+                                .lineSpacing(1)
+                                .minimumScaleFactor(0.45)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(multilineValue ? 2 : 1)
+                                .padding(.horizontal, 10)
+                                .padding(.top, 14)
+                        }
+                        .animation(.easeInOut(duration: 0.35), value: fillFraction)
+                        .animation(.easeInOut(duration: 0.35), value: detailFraction)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct WindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.hasShadow = true
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+        }
+
+        return view
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+            window.backgroundColor = .clear
+            window.isOpaque = false
         }
     }
 }
 
-private let itemFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
-    return formatter
-}()
-
-#Preview {
-    ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+    }
 }
