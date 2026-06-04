@@ -6,9 +6,10 @@
 //
 
 import Combine
+import Darwin
+import Darwin.Mach
 import Foundation
 import SwiftUI
-import Darwin
 
 @MainActor
 final class MemoryMonitor: ObservableObject {
@@ -123,35 +124,18 @@ private actor MemorySampler {
     private let totalBytes = Double(ProcessInfo.processInfo.physicalMemory)
 
     nonisolated func sample() -> MemorySnapshot? {
-        guard
-            let memoryPressureOutput = CommandRunner.run(
-                "/usr/bin/memory_pressure",
-                arguments: ["-Q"]
-            ),
-            let vmStatOutput = CommandRunner.run(
-                "/usr/bin/vm_stat",
-                arguments: []
-            ),
-            let freePercent = parseFreePercent(from: memoryPressureOutput),
-            let vmStats = parseVMStat(vmStatOutput)
-        else {
+        guard let vmStats = VMStatistics.current() else {
             return nil
         }
 
-        let pageSize = vmStats.pageSize
-        let freePages = vmStats.values["Pages free"] ?? 0
-        let speculativePages = vmStats.values["Pages speculative"] ?? 0
-        let fileBackedPages = vmStats.values["File-backed pages"] ?? 0
-        let compressorFootprintPages = vmStats.values["Pages occupied by compressor"] ?? 0
-
-        // Activity Monitor's "Memory Used" lines up much better with total physical
-        // memory minus free/speculative pages and file-backed cached pages.
-        let availableBytes = (freePages + speculativePages + fileBackedPages) * pageSize
-        let usedBytes = clamp(totalBytes - availableBytes, lower: 0, upper: totalBytes)
-        let compressedBytes = min(compressorFootprintPages * pageSize, usedBytes)
+        let appBytes = vmStats.anonymousBytes
+        let wiredBytes = vmStats.wiredBytes
+        let compressedBytes = vmStats.compressedBytes
+        let usedBytes = clamp(appBytes + wiredBytes + compressedBytes, lower: 0, upper: totalBytes)
         let pressureLevel = MemoryPressureReader.currentLevel()
+        let availablePercent = MemoryPressureReader.currentAvailablePercent(vmStats: vmStats)
         let pressureFraction = pressureFraction(
-            freePercent: freePercent,
+            availablePercent: availablePercent,
             pressureLevel: pressureLevel
         )
         let usageFraction = clamp(usedBytes / totalBytes)
@@ -167,57 +151,11 @@ private actor MemorySampler {
         )
     }
 
-    private nonisolated func parseFreePercent(from output: String) -> Double? {
-        guard
-            let match = output.captureGroup(for: #"System-wide memory free percentage:\s*(\d+)%"#),
-            let value = Double(match)
-        else {
-            return nil
-        }
-
-        return value
-    }
-
-    private nonisolated func parseVMStat(_ output: String) -> ParsedVMStat? {
-        let lines = output.split(separator: "\n").map(String.init)
-        guard let header = lines.first else {
-            return nil
-        }
-
-        guard
-            let match = header.captureGroup(for: #"page size of\s+(\d+)\s+bytes"#),
-            let pageSize = Double(match)
-        else {
-            return nil
-        }
-
-        var values: [String: Double] = [:]
-
-        for line in lines.dropFirst() {
-            let pieces = line.split(separator: ":", maxSplits: 1).map(String.init)
-            guard pieces.count == 2 else { continue }
-
-            let key = pieces[0]
-                .replacingOccurrences(of: "\"", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let rawValue = pieces[1]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: ".", with: "")
-
-            if let value = Double(rawValue) {
-                values[key] = value
-            }
-        }
-
-        return ParsedVMStat(pageSize: pageSize, values: values)
-    }
-
     private nonisolated func pressureFraction(
-        freePercent: Double,
+        availablePercent: Double,
         pressureLevel: MemoryPressureLevel?
     ) -> Double {
-        let rawPressure = clamp(1.0 - (freePercent / 100.0))
+        let rawPressure = clamp(1.0 - (availablePercent / 100.0))
 
         guard let pressureLevel else {
             return rawPressure
@@ -225,44 +163,12 @@ private actor MemorySampler {
 
         switch pressureLevel {
         case .normal:
-            return clamp(rawPressure * 0.45, lower: 0.05, upper: 0.34)
+            return rawPressure
         case .warning:
-            return clamp(0.35 + (rawPressure * 0.45), lower: 0.35, upper: 0.74)
+            return max(rawPressure, 0.5)
         case .critical:
-            return clamp(0.75 + (rawPressure * 0.25), lower: 0.75, upper: 1.0)
+            return max(rawPressure, 0.8)
         }
-    }
-}
-
-private struct ParsedVMStat {
-    let pageSize: Double
-    let values: [String: Double]
-}
-
-private enum CommandRunner {
-    nonisolated static func run(_ executablePath: String, arguments: [String]) -> String? {
-        let process = Process()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: executablePath)
-        process.arguments = arguments
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-
-        guard process.terminationStatus == 0 else {
-            return nil
-        }
-
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
     }
 }
 
@@ -272,20 +178,75 @@ private enum MemoryPressureLevel {
     case critical
 }
 
-private enum MemoryPressureReader {
-    nonisolated static func currentLevel() -> MemoryPressureLevel? {
-        var value = Int32(0)
-        var size = MemoryLayout<Int32>.size
+private struct VMStatistics {
+    let pageSize: Double
+    let freePages: Double
+    let speculativePages: Double
+    let purgeablePages: Double
+    let fileBackedPages: Double
+    let anonymousPages: Double
+    let wiredPages: Double
+    let compressorPages: Double
 
-        let result = sysctlbyname(
-            "kern.memorystatus_vm_pressure_level",
-            &value,
-            &size,
-            nil,
-            0
+    nonisolated var anonymousBytes: Double {
+        anonymousPages * pageSize
+    }
+
+    nonisolated var wiredBytes: Double {
+        wiredPages * pageSize
+    }
+
+    nonisolated var compressedBytes: Double {
+        compressorPages * pageSize
+    }
+
+    nonisolated var reclaimableBytes: Double {
+        (freePages + speculativePages + purgeablePages + fileBackedPages) * pageSize
+    }
+
+    nonisolated static func current() -> VMStatistics? {
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+
+        let result = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+
+        guard result == KERN_SUCCESS else {
+            return nil
+        }
+
+        return VMStatistics(
+            pageSize: Double(vm_kernel_page_size),
+            freePages: Double(stats.free_count),
+            speculativePages: Double(stats.speculative_count),
+            purgeablePages: Double(stats.purgeable_count),
+            fileBackedPages: Double(stats.external_page_count),
+            anonymousPages: Double(stats.internal_page_count),
+            wiredPages: Double(stats.wire_count),
+            compressorPages: Double(stats.compressor_page_count)
         )
+    }
+}
 
-        guard result == 0 else {
+private enum MemoryPressureReader {
+    nonisolated static func currentAvailablePercent(vmStats: VMStatistics) -> Double {
+        if let kernelLevel = intSysctl(named: "kern.memorystatus_level") {
+            return clamp(Double(kernelLevel), lower: 0, upper: 100)
+        }
+
+        let totalBytes = Double(ProcessInfo.processInfo.physicalMemory)
+        guard totalBytes > 0 else {
+            return 0
+        }
+
+        return clamp((vmStats.reclaimableBytes / totalBytes) * 100, lower: 0, upper: 100)
+    }
+
+    nonisolated static func currentLevel() -> MemoryPressureLevel? {
+        guard let value = intSysctl(named: "kern.memorystatus_vm_pressure_level") else {
             return nil
         }
 
@@ -298,6 +259,25 @@ private enum MemoryPressureReader {
             return .critical
         }
     }
+
+    private nonisolated static func intSysctl(named name: String) -> Int32? {
+        var value = Int32(0)
+        var size = MemoryLayout<Int32>.size
+
+        let result = sysctlbyname(
+            name,
+            &value,
+            &size,
+            nil,
+            0
+        )
+
+        guard result == 0, size == MemoryLayout<Int32>.size else {
+            return nil
+        }
+
+        return value
+    }
 }
 
 nonisolated private func clamp(_ value: Double) -> Double {
@@ -306,25 +286,6 @@ nonisolated private func clamp(_ value: Double) -> Double {
 
 nonisolated private func clamp(_ value: Double, lower: Double, upper: Double) -> Double {
     min(max(value, lower), upper)
-}
-
-private extension String {
-    nonisolated func captureGroup(for pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-
-        let range = NSRange(startIndex..<endIndex, in: self)
-        guard
-            let match = regex.firstMatch(in: self, range: range),
-            match.numberOfRanges > 1,
-            let captureRange = Range(match.range(at: 1), in: self)
-        else {
-            return nil
-        }
-
-        return String(self[captureRange])
-    }
 }
 
 private extension Double {

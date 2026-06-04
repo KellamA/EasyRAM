@@ -12,11 +12,11 @@ struct ContentView: View {
     @StateObject private var memoryMonitor = MemoryMonitor()
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             WindowConfigurator()
 
-            HStack(spacing: 10) {
-                MeterCard(
+            HStack(spacing: 12) {
+                MeterColumn(
                     title: "Pressure",
                     valueText: memoryMonitor.snapshot.pressureText,
                     multilineValue: false,
@@ -26,7 +26,7 @@ struct ContentView: View {
                     detailFraction: 0
                 )
 
-                MeterCard(
+                MeterColumn(
                     title: "Usage",
                     valueText: memoryMonitor.snapshot.usageMultilineText,
                     multilineValue: true,
@@ -36,12 +36,17 @@ struct ContentView: View {
                     detailFraction: memoryMonitor.snapshot.compressedFraction
                 )
             }
-            .padding(8)
+            .padding(14)
             .background {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(.ultraThinMaterial.opacity(0.55))
-                    .shadow(color: .black.opacity(0.10), radius: 10, y: 6)
-                }
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.ultraThinMaterial.opacity(0.62))
+                    .shadow(color: .black.opacity(0.12), radius: 14, y: 8)
+            }
+
+            DraggableTopArea()
+                .frame(height: 68)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
         }
         .padding(8)
         .frame(width: 309, height: 320)
@@ -49,7 +54,7 @@ struct ContentView: View {
     }
 }
 
-private struct MeterCard: View {
+private struct MeterColumn: View {
     let title: String
     let valueText: String
     let multilineValue: Bool
@@ -60,46 +65,36 @@ private struct MeterCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.58))
-
-                Spacer()
-            }
+            Text(title)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.68))
 
             GeometryReader { geometry in
-                let meterHeight = geometry.size.height
-                let fillHeight = max(geometry.size.height * fillFraction, 44)
-                let detailHeight = geometry.size.height * detailFraction
+                let trackHeight = geometry.size.height
+                let fillHeight = min(max(trackHeight * fillFraction, 42), trackHeight)
+                let detailHeight = min(max(trackHeight * detailFraction, 22), fillHeight)
 
                 ZStack(alignment: .bottom) {
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(Color.white.opacity(0.04))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-                        )
+                        .fill(Color.white.opacity(0.055))
 
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(fillGradient)
-                        .frame(height: min(fillHeight, meterHeight - 12))
-                        .padding(8)
+                        .frame(height: fillHeight)
                         .overlay(alignment: .bottom) {
                             if let detailText, detailFraction > 0 {
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(Color.black.opacity(0.18))
-                                    .frame(height: max(min(detailHeight, meterHeight - 28), 22))
-                                    .padding(.horizontal, 3)
-                                    .padding(.bottom, 3)
+                                    .fill(Color.black.opacity(0.24))
+                                    .frame(height: detailHeight)
                                     .overlay(alignment: .bottom) {
                                         Text(detailText)
                                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                                             .foregroundStyle(Color.white.opacity(0.92))
                                             .multilineTextAlignment(.center)
                                             .minimumScaleFactor(0.55)
+                                            .fixedSize(horizontal: false, vertical: true)
                                             .lineLimit(2)
-                                            .padding(.horizontal, 8)
+                                            .padding(.horizontal, 6)
                                             .padding(.bottom, 8)
                                     }
                             }
@@ -121,16 +116,6 @@ private struct MeterCard: View {
                 }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color.white.opacity(0.035))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-                )
-        )
     }
 }
 
@@ -140,13 +125,7 @@ private struct WindowConfigurator: NSViewRepresentable {
 
         DispatchQueue.main.async {
             guard let window = view.window else { return }
-
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = true
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
+            configure(window)
         }
 
         return view
@@ -155,9 +134,40 @@ private struct WindowConfigurator: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
             guard let window = nsView.window else { return }
-            window.backgroundColor = .clear
-            window.isOpaque = false
+            configure(window)
         }
+    }
+
+    private func configure(_ window: NSWindow) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+
+        window.standardWindowButton(.closeButton)?.isHidden = false
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = false
+        window.standardWindowButton(.zoomButton)?.isHidden = false
+    }
+}
+
+private struct DraggableTopArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        WindowDragView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class WindowDragView: NSView {
+    override var mouseDownCanMoveWindow: Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
     }
 }
 
